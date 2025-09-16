@@ -84,7 +84,6 @@ func (wp *WorkerPool) SubmitWait(task func()) {
 		wp.mu.RUnlock()
 		return
 	}
-	wp.mu.RUnlock()
 
 	done := make(chan struct{})
 
@@ -94,6 +93,8 @@ func (wp *WorkerPool) SubmitWait(task func()) {
 	}
 
 	wp.taskQueue <- wrappedTask
+
+	wp.mu.RUnlock()
 	<-done
 }
 
