@@ -8,12 +8,9 @@ import (
 )
 
 func main() {
-    // Создаем пул с 3 воркерами, размер очереди 100 и хук после каждой задачи
-    wp := worker_pool.NewWorkerPool(3, 100, func() {
-        // post-task hook (демо)
-        fmt.Println("task done")
-    })
-    defer func() { _ = wp.Stop() }()
+    // Создаем пул с 3 воркерами
+    wp := worker_pool.NewWorkerPool(3)
+    defer wp.Stop()
 
     var wg sync.WaitGroup
     totalTasks := 100
@@ -28,19 +25,20 @@ func main() {
     for i := 0; i < totalTasks; i++ {
         wg.Add(1)
         taskID := i
-        if err := wp.Submit(func() {
+        
+        wp.Submit(func() {
             defer wg.Done()
+            
             // Имитируем работу
             time.Sleep(100 * time.Millisecond)
+            
             mu.Lock()
             completedTasks++
             current := completedTasks
             mu.Unlock()
+            
             fmt.Printf("Задача %d завершена (всего: %d/%d)\n", taskID, current, totalTasks)
-        }); err != nil {
-            wg.Done()
-            fmt.Printf("Submit error: %v\n", err)
-        }
+        })
     }
 
     // Ждем завершения всех задач
@@ -50,26 +48,27 @@ func main() {
     // Демонстрация SubmitWait
     fmt.Println("\n=== Демонстрация SubmitWait ===")
     start := time.Now()
-    _ = wp.SubmitWait(func() {
+    wp.SubmitWait(func() {
         time.Sleep(200 * time.Millisecond)
         fmt.Println("Задача с SubmitWait завершена!")
     })
     duration := time.Since(start)
     fmt.Printf("SubmitWait занял: %v\n", duration)
 
-    // Демонстрация Stop (ожидает все задачи)
-    fmt.Println("\n=== Демонстрация Stop ===")
-    wp2 := worker_pool.NewWorkerPool(2, 10, nil)
+    // Демонстрация StopWait
+    fmt.Println("\n=== Демонстрация StopWait ===")
+    wp2 := worker_pool.NewWorkerPool(2)
     
     // Добавляем несколько задач
     for i := 0; i < 5; i++ {
         taskID := i
-        _ = wp2.Submit(func() {
+        wp2.Submit(func() {
             time.Sleep(100 * time.Millisecond)
-            fmt.Printf("Задача %d в Stop примере завершена\n", taskID)
+            fmt.Printf("Задача %d в StopWait примере завершена\n", taskID)
         })
     }
-    fmt.Println("Останавливаем пул со Stop...")
-    _ = wp2.Stop()
+    
+    fmt.Println("Останавливаем пул с StopWait...")
+    wp2.StopWait()
     fmt.Println("Пул остановлен, все задачи выполнены!")
 }
