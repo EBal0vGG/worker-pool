@@ -8,8 +8,8 @@ import (
 
 func TestWorkerPoolQueueBehavior(t *testing.T) {
 	t.Run("все задачи должны выполниться", func(t *testing.T) {
-		wp := NewWorkerPool(3)
-		defer wp.StopWait()
+		wp := NewWorkerPool(3, 100, nil)
+		defer wp.Stop()
 
 		taskCount := 50
 		completed := make([]bool, taskCount)
@@ -19,13 +19,15 @@ func TestWorkerPoolQueueBehavior(t *testing.T) {
 		for i := 0; i < taskCount; i++ {
 			wg.Add(1)
 			taskID := i
-			wp.Submit(func() {
+			if err := wp.Submit(func() {
 				defer wg.Done()
 				time.Sleep(5 * time.Millisecond)
 				mu.Lock()
 				completed[taskID] = true
 				mu.Unlock()
-			})
+			}); err != nil {
+				t.Fatalf("Submit error: %v", err)
+			}
 		}
 
 		wg.Wait()
@@ -38,13 +40,15 @@ func TestWorkerPoolQueueBehavior(t *testing.T) {
 	})
 
 	t.Run("SubmitWait должен ждать завершения задачи", func(t *testing.T) {
-		wp := NewWorkerPool(1)
+		wp := NewWorkerPool(1, 10, nil)
 		defer wp.Stop()
 
 		start := time.Now()
-		wp.SubmitWait(func() {
+		if err := wp.SubmitWait(func() {
 			time.Sleep(100 * time.Millisecond)
-		})
+		}); err != nil {
+			t.Fatalf("SubmitWait error: %v", err)
+		}
 		duration := time.Since(start)
 
 		if duration < 90*time.Millisecond {
@@ -53,8 +57,8 @@ func TestWorkerPoolQueueBehavior(t *testing.T) {
 	})
 
 	t.Run("порядок выполнения задач FIFO", func(t *testing.T) {
-		wp := NewWorkerPool(1) // один воркер → последовательное выполнение
-		defer wp.StopWait()
+		wp := NewWorkerPool(1, 100, nil) // один воркер → последовательное выполнение
+		defer wp.Stop()
 
 		var order []int
 		var mu sync.Mutex
@@ -63,12 +67,14 @@ func TestWorkerPoolQueueBehavior(t *testing.T) {
 		for i := 0; i < 10; i++ {
 			wg.Add(1)
 			taskID := i
-			wp.Submit(func() {
+			if err := wp.Submit(func() {
 				defer wg.Done()
 				mu.Lock()
 				order = append(order, taskID)
 				mu.Unlock()
-			})
+			}); err != nil {
+				t.Fatalf("Submit error: %v", err)
+			}
 		}
 
 		wg.Wait()
@@ -81,71 +87,72 @@ func TestWorkerPoolQueueBehavior(t *testing.T) {
 		}
 	})
 
-	t.Run("StopWait должен дождаться всех задач в очереди", func(t *testing.T) {
-		wp := NewWorkerPool(2)
+	t.Run("Stop должен дождаться всех задач в очереди", func(t *testing.T) {
+		wp := NewWorkerPool(2, 100, nil)
 
 		taskCount := 10
 		var completed int
 		var mu sync.Mutex
 
 		for i := 0; i < taskCount; i++ {
-			wp.Submit(func() {
+			if err := wp.Submit(func() {
 				time.Sleep(20 * time.Millisecond)
 				mu.Lock()
 				completed++
 				mu.Unlock()
-			})
+			}); err != nil {
+				t.Fatalf("Submit error: %v", err)
+			}
 		}
 
-		wp.StopWait()
+		if err := wp.Stop(); err != nil {
+			t.Fatalf("Stop error: %v", err)
+		}
 
 		if completed != taskCount {
 			t.Errorf("Ожидалось %d задач, выполнено %d", taskCount, completed)
 		}
 	})
 
-	t.Run("Stop должен выполнить только текущие задачи и отбросить очередь", func(t *testing.T) {
-		wp := NewWorkerPool(1)
+	t.Run("Stop/Submit при переполнении и остановке", func(t *testing.T) {
+		wp := NewWorkerPool(1, 1, nil)
 
-		var completed int
-		var mu sync.Mutex
-
-		// первая задача гарантированно начнёт выполняться
-		wp.Submit(func() {
-			time.Sleep(100 * time.Millisecond)
-			mu.Lock()
-			completed++
-			mu.Unlock()
-		})
-
-		// эти задачи должны попасть в очередь
-		for i := 0; i < 5; i++ {
-			wp.Submit(func() {
-				mu.Lock()
-				completed++
-				mu.Unlock()
-			})
+		started := make(chan struct{})
+		// первая задача сигналит, что она началась (значит снята из очереди)
+		if err := wp.Submit(func() {
+			close(started)
+			time.Sleep(50 * time.Millisecond)
+		}); err != nil {
+			t.Fatalf("Submit error: %v", err)
 		}
 
-		// подождём, чтобы первая задача начала выполняться
-		time.Sleep(10 * time.Millisecond)
+		// Ждем, пока первая задача начнется
+		<-started
 
-		wp.Stop() // должен выполнить только первую, остальные отбросить
+		// эта задача должна занять единственный слот в очереди
+		if err := wp.Submit(func() {}); err != nil {
+			t.Fatalf("Submit error: %v", err)
+		}
 
-		if completed != 1 {
-			t.Errorf("Stop должен был выполнить только текущую задачу, а выполнено %d", completed)
+		// следующая должна вернуть ошибку переполнения
+		if err := wp.Submit(func() {}); err == nil {
+			t.Fatalf("ожидалась ошибка переполнения очереди")
+		}
+
+		if err := wp.Stop(); err != nil {
+			t.Fatalf("Stop error: %v", err)
 		}
 	})
 }
 
 func BenchmarkWorkerPool(b *testing.B) {
-	wp := NewWorkerPool(4)
-	defer wp.StopWait()
+	wp := NewWorkerPool(4, 100000, nil)
+	defer wp.Stop()
 
 	b.ResetTimer()
 	b.RunParallel(func(pb *testing.PB) {
 		for pb.Next() {
-			wp.Submit(func() {
+			_ = wp.Submit(func() {
 				time.Sleep(time.Microsecond)
 			})
 		}
@@ -153,12 +160,12 @@ func BenchmarkWorkerPool(b *testing.B) {
 }
 
 func BenchmarkSubmitWait(b *testing.B) {
-	wp := NewWorkerPool(4)
-	defer wp.StopWait()
+	wp := NewWorkerPool(4, 100000, nil)
+	defer wp.Stop()
 
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		wp.SubmitWait(func() {
+		_ = wp.SubmitWait(func() {
 			time.Sleep(time.Microsecond)
 		})
 	}
