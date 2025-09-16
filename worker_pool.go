@@ -1,35 +1,40 @@
 package worker_pool
 
 import (
-	"context"
+	"errors"
 	"sync"
+	"fmt"
 )
+
+type Pool interface {
+	Submit(task func()) error
+	Stop() error
+}
+
+var _ Pool = (*WorkerPool)(nil)
 
 type WorkerPool struct {
 	workers   int
 	taskQueue chan func()
 
 	waitGroup sync.WaitGroup
-	ctx       context.Context
-	cancel    context.CancelFunc
 
-	mu        sync.RWMutex
-	isRunning bool
+	afterTaskHook func()
 }
 
-func NewWorkerPool(numberOfWorkers int) *WorkerPool {
+// NewWorkerPool — создаёт пул воркеров
+func NewWorkerPool(numberOfWorkers, queueSize int, afterTaskHook func()) *WorkerPool {
 	if numberOfWorkers <= 0 {
 		numberOfWorkers = 1
 	}
-
-	ctx, cancel := context.WithCancel(context.Background())
+	if queueSize <= 0 {
+		queueSize = 1
+	}
 
 	wp := &WorkerPool{
-		workers:   numberOfWorkers,
-		taskQueue: make(chan func(), 100),
-		ctx:       ctx,
-		cancel:    cancel,
-		isRunning: true,
+		workers:       numberOfWorkers,
+		taskQueue:     make(chan func(), queueSize),
+		afterTaskHook: afterTaskHook,
 	}
 
 	// Запускаем воркеров
@@ -41,100 +46,95 @@ func NewWorkerPool(numberOfWorkers int) *WorkerPool {
 	return wp
 }
 
-// worker — горутина, которая обрабатывает задачи из очереди
+// worker — воркер, обрабатывающий задачи
 func (wp *WorkerPool) worker(id int) {
 	defer wp.waitGroup.Done()
-	
-	for {
-		select {
-		case <-wp.ctx.Done():
-			return
-		case task, ok := <-wp.taskQueue:
-			if !ok {
-				return
-			}
-			if task != nil {
-				task()
-			}
+
+	// range по закрытому каналу завершается, когда канал пустой
+	for task := range wp.taskQueue {
+		if task == nil {
+			continue
 		}
-	}	
+
+		// Выполнение задачи с защитой от паники
+		func() {
+			defer func() { 
+				r := recover()
+				if r != nil {
+					fmt.Printf("worker %d: panic in task: %v\n", id, r)
+				}
+			}()
+			task()
+		}()
+
+		// Выполнение afterTaskHook
+		if wp.afterTaskHook != nil {
+			func() { 
+				defer func() { 
+					r := recover()
+					if r != nil {
+						fmt.Printf("worker %d: panic in afterTaskHook: %v\n", id, r)
+					}
+				}()
+				wp.afterTaskHook() 
+			}()
+		}
+	}
 }
 
 // Submit — добавить задачу в пул
-func (wp *WorkerPool) Submit(task func()) {
-	wp.mu.RLock()
-	defer wp.mu.RUnlock()
-
-	if !wp.isRunning {
-		return
+func (wp *WorkerPool) Submit(task func()) error {
+	if task == nil {
+		return errors.New("task is nil")
 	}
 
 	select {
 	case wp.taskQueue <- task:
-		// Задача добавлена
+		return nil
 	default:
-		// Очередь переполнена — игнорируем
+		return errors.New("task queue is full")
 	}
 }
 
-// SubmitWait — добавить задачу и дождаться её завершения
-func (wp *WorkerPool) SubmitWait(task func()) {
-	wp.mu.RLock()
-	if !wp.isRunning {
-		wp.mu.RUnlock()
-		return
+// SubmitWait — добавить задачу и дождаться выполнения
+func (wp *WorkerPool) SubmitWait(task func()) error {
+	if task == nil {
+		return errors.New("task is nil")
 	}
 
 	done := make(chan struct{})
 
 	wrappedTask := func() {
+		defer close(done)
 		task()
-		close(done)
 	}
 
-	wp.taskQueue <- wrappedTask
-
-	wp.mu.RUnlock()
-	<-done
+	select {
+	case wp.taskQueue <- wrappedTask:
+		<-done
+		return nil
+	default:
+		return errors.New("task queue is full")
+	}
 }
 
-// Stop — остановить пул, выполнить только текущие задачи, отбросить очередь
-func (wp *WorkerPool) Stop() {
-	wp.mu.Lock()
-	if !wp.isRunning {
-		wp.mu.Unlock()
-		return
-	}
-	wp.isRunning = false
-	wp.mu.Unlock()
-
-	// Сигналим воркерам прекратить брать новые задачи
-	wp.cancel()
-
-	// Ждём выполнения только активных
-	wp.waitGroup.Wait()
-}
-
-// StopWait — остановить пул и дождаться выполнения всех задач
-func (wp *WorkerPool) StopWait() {
-	wp.mu.Lock()
-	if !wp.isRunning {
-		wp.mu.Unlock()
-		return
-	}
-	wp.isRunning = false
-	wp.mu.Unlock()
-
-	// Закрываем очередь задач
+// Stop — закрывает пул и ждёт выполнения всех задач
+func (wp *WorkerPool) Stop() error {
+	// Закрываем канал, воркеры продолжат выполнять задачи до конца очереди
 	close(wp.taskQueue)
 
 	// Ждём завершения всех воркеров
 	wp.waitGroup.Wait()
+	return nil
 }
 
-// IsRunning — вернуть статус пула
+// IsRunning — проверка, есть ли ещё воркеры
 func (wp *WorkerPool) IsRunning() bool {
-	wp.mu.RLock()
-	defer wp.mu.RUnlock()
-	return wp.isRunning
+	// Если канал закрыт — пул остановлен
+	select {
+	case <-wp.taskQueue:
+		return true
+	default:
+		return true // канал открыт, значит пул работает
+	}
 }
