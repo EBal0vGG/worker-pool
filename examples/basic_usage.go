@@ -26,7 +26,7 @@ func main() {
         wg.Add(1)
         taskID := i
         
-        wp.Submit(func() {
+        _ = wp.Submit(func() error {
             defer wg.Done()
             
             // Имитируем работу
@@ -38,6 +38,7 @@ func main() {
             mu.Unlock()
             
             fmt.Printf("Задача %d завершена (всего: %d/%d)\n", taskID, current, totalTasks)
+            return nil
         })
     }
 
@@ -48,9 +49,10 @@ func main() {
     // Демонстрация SubmitWait
     fmt.Println("\n=== Демонстрация SubmitWait ===")
     start := time.Now()
-    wp.SubmitWait(func() {
+    _ = wp.SubmitWait(func() error {
         time.Sleep(200 * time.Millisecond)
         fmt.Println("Задача с SubmitWait завершена!")
+        return nil
     })
     duration := time.Since(start)
     fmt.Printf("SubmitWait занял: %v\n", duration)
@@ -62,9 +64,10 @@ func main() {
     // Добавляем несколько задач
     for i := 0; i < 5; i++ {
         taskID := i
-        wp2.Submit(func() {
+        _ = wp2.Submit(func() error {
             time.Sleep(100 * time.Millisecond)
             fmt.Printf("Задача %d в StopWait примере завершена\n", taskID)
+            return nil
         })
     }
     

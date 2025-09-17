@@ -1,3 +1,3 @@
 module worker_pool
 
-go 1.21
+go 1.24

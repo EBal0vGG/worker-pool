@@ -1,8 +1,11 @@
 package worker_pool
 
 import (
-	"context"
-	"sync"
+    "context"
+    "errors"
+    "log"
+    "runtime/debug"
+    "sync"
 )
 
 type WorkerPool struct {
@@ -50,39 +53,63 @@ func (wp *WorkerPool) worker() {
 				return
 			}
 			if task != nil {
-				func() { defer func() { recover() }(); task() }()
+                func() {
+                    defer func() {
+                        if r := recover(); r != nil {
+                            log.Printf("worker recovered panic: %v\n%s", r, debug.Stack())
+                        }
+                    }()
+                    task()
+                }()
 			}
 		}
 	}
 }
 
 // Submit — добавить задачу в пул
-func (wp *WorkerPool) Submit(task func()) {
-	if task == nil {
-		return
-	}
+func (wp *WorkerPool) Submit(task func() error) error {
+    if task == nil {
+        return nil
+    }
 
-	select {
-	case wp.taskQueue <- task:
-	default:
-		// игнорируем переполнение очереди
-	}
+    wrapped := func() {
+        defer func() {
+            if r := recover(); r != nil {
+                log.Printf("task panic: %v\n%s", r, debug.Stack())
+            }
+        }()
+        if err := task(); err != nil {
+            log.Printf("task error: %v", err)
+        }
+    }
+
+    select {
+    case wp.taskQueue <- wrapped:
+        return nil
+    default:
+        return errors.New("worker pool queue is full")
+    }
 }
 
 // SubmitWait — добавить задачу и дождаться её завершения
-func (wp *WorkerPool) SubmitWait(task func()) {
-	if task == nil {
-		return
-	}
+func (wp *WorkerPool) SubmitWait(task func() error) error {
+    if task == nil {
+        return nil
+    }
 
-	done := make(chan struct{})
-	wrappedTask := func() {
-		task()
-		close(done)
-	}
+    done := make(chan error, 1)
+    wrappedTask := func() {
+        defer func() {
+            if r := recover(); r != nil {
+                log.Printf("task panic: %v\n%s", r, debug.Stack())
+                done <- errors.New("task panicked")
+            }
+        }()
+        done <- task()
+    }
 
-	wp.taskQueue <- wrappedTask
-	<-done
+    wp.taskQueue <- wrappedTask
+    return <-done
 }
 
 // Stop — выполнить только текущие задачи, отбросив очередь
